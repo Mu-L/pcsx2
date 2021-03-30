@@ -497,7 +497,8 @@ void MainEmuFrame::CreateConfigMenu()
 void MainEmuFrame::CreateWindowsMenu()
 {
 	m_menuWindow.Append(MenuId_Debug_Open, _("&Show Debug"), wxEmptyString, wxITEM_CHECK);
-#ifdef PCSX2_DEVBUILD
+	// Enable GS Debugger on non release builds or CI artifacts for testing.
+#if defined(PCSX2_DEVBUILD) || defined(PCSX2_WIN_CI)
 	m_menuWindow.Append(MenuId_GSDump, _("Show &GS Debugger"));
 #endif
 
