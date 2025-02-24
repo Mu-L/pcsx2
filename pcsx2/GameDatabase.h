@@ -1,32 +1,25 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2020  PCSX2 Dev Team
- *
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
-#include "yaml-cpp/yaml.h"
+#include "Config.h"
+#include "Patch.h"
 
-#include <unordered_map>
-#include <vector>
+#include "common/FPControl.h"
+
+#include <cstring>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
-// Since this is kinda yaml specific, might be a good idea to
-// relocate this into the yaml class
-// or put the serialization methods inside the yaml
-class GameDatabaseSchema
+enum GamefixId;
+
+namespace GameDatabaseSchema
 {
-public:
 	enum class Compatibility
 	{
 		Unknown = 0,
@@ -38,73 +31,133 @@ public:
 		Perfect
 	};
 
-	enum class RoundMode
-	{
-		Undefined = -1,
-		Nearest = 0,
-		NegativeInfinity,
-		PositiveInfinity,
-		ChopZero
-	};
-
 	enum class ClampMode
 	{
 		Undefined = -1,
 		Disabled = 0,
 		Normal,
 		Extra,
-		Full
+		Full,
+		Count
 	};
 
-	struct Patch
+	enum class GSHWFixId : u32
 	{
-		std::string author;
-		std::vector<std::string> patchLines;
+		// boolean settings
+		AutoFlush,
+		CPUFramebufferConversion,
+		FlushTCOnClose,
+		DisableDepthSupport,
+		PreloadFrameData,
+		DisablePartialInvalidation,
+		TextureInsideRT,
+		AlignSprite,
+		MergeSprite,
+		Mipmap,
+		ForceEvenSpritePosition,
+		BilinearUpscale,
+		NativePaletteDraw,
+		EstimateTextureRegion,
+		PCRTCOffsets,
+		PCRTCOverscan,
+
+		// integer settings
+		TrilinearFiltering,
+		SkipDrawStart,
+		SkipDrawEnd,
+		HalfBottomOverride,
+		HalfPixelOffset,
+		RoundSprite,
+		NativeScaling,
+		TexturePreloading,
+		Deinterlace,
+		CPUSpriteRenderBW,
+		CPUSpriteRenderLevel,
+		CPUCLUTRender,
+		GPUTargetCLUT,
+		GPUPaletteConversion,
+		MinimumBlendingLevel,
+		MaximumBlendingLevel,
+		RecommendedBlendingLevel,
+		GetSkipCount,
+		BeforeDraw,
+		MoveHandler,
+
+		Count
 	};
 
 	struct GameEntry
 	{
-		bool isValid = true;
 		std::string name;
+		std::string name_sort;
+		std::string name_en;
 		std::string region;
 		Compatibility compat = Compatibility::Unknown;
-		RoundMode eeRoundMode = RoundMode::Undefined;
-		RoundMode vuRoundMode = RoundMode::Undefined;
+		FPRoundMode eeRoundMode = FPRoundMode::MaxCount;
+		FPRoundMode eeDivRoundMode = FPRoundMode::MaxCount;
+		FPRoundMode vu0RoundMode = FPRoundMode::MaxCount;
+		FPRoundMode vu1RoundMode = FPRoundMode::MaxCount;
 		ClampMode eeClampMode = ClampMode::Undefined;
-		ClampMode vuClampMode = ClampMode::Undefined;
-		std::vector<std::string> gameFixes;
-		std::unordered_map<std::string, int> speedHacks;
+		ClampMode vu0ClampMode = ClampMode::Undefined;
+		ClampMode vu1ClampMode = ClampMode::Undefined;
+		std::vector<GamefixId> gameFixes;
+		std::vector<std::pair<SpeedHack, int>> speedHacks;
+		std::vector<std::pair<GSHWFixId, s32>> gsHWFixes;
 		std::vector<std::string> memcardFilters;
-		std::unordered_map<std::string, Patch> patches;
+		std::unordered_map<u32, std::string> patches;
+		std::vector<Patch::DynamicPatch> dynaPatches;
 
 		// Returns the list of memory card serials as a `/` delimited string
 		std::string memcardFiltersAsString() const;
-		bool findPatch(const std::string crc, Patch& patch) const;
+		const std::string* findPatch(u32 crc) const;
+		const char* compatAsString() const;
+
+		/// Applies Core game fixes to an existing config.
+		void applyGameFixes(Pcsx2Config& config, bool applyAuto) const;
+
+		/// Applies GS hardware fixes to an existing config.
+		void applyGSHardwareFixes(Pcsx2Config::GSOptions& config) const;
+
+		/// Returns true if the current config value for the specified hw fix id matches the value.
+		static bool configMatchesHWFix(const Pcsx2Config::GSOptions& config, GSHWFixId id, int value);
 	};
-};
+}; // namespace GameDatabaseSchema
 
-class IGameDatabase
+namespace GameDatabase
 {
-public:
-	virtual bool initDatabase(std::ifstream& stream) = 0;
-	virtual GameDatabaseSchema::GameEntry findGame(const std::string serial) = 0;
-	virtual int numGames() = 0;
-};
+	void ensureLoaded();
+	const GameDatabaseSchema::GameEntry* findGame(const std::string_view serial);
 
-class YamlGameDatabaseImpl : public IGameDatabase
-{
-public:
-	bool initDatabase(std::ifstream& stream) override;
-	GameDatabaseSchema::GameEntry findGame(const std::string serial) override;
-	int numGames() override;
+	struct TrackHash
+	{
+		static constexpr u32 SIZE = 16;
 
-private:
-	std::unordered_map<std::string, GameDatabaseSchema::GameEntry> gameDb;
-	GameDatabaseSchema::GameEntry entryFromYaml(const std::string serial, const YAML::Node& node);
+		bool parseHash(const std::string_view str);
+		std::string toString() const;
 
-	std::vector<std::string> convertMultiLineStringToVector(const std::string multiLineString);
-};
+#define MAKE_OPERATOR(op) \
+	bool operator op(const TrackHash& hash) const { return (std::memcmp(data, hash.data, sizeof(data)) op 0); }
+		MAKE_OPERATOR(==);
+		MAKE_OPERATOR(!=);
+		MAKE_OPERATOR(<);
+		MAKE_OPERATOR(<=);
+		MAKE_OPERATOR(>);
+		MAKE_OPERATOR(>=);
+#undef MAKE_OPERATOR
 
-extern IGameDatabase* AppHost_GetGameDatabase();
-extern std::string strToLower(std::string str);
-extern bool compareStrNoCase(const std::string str1, const std::string str2);
+		u8 data[SIZE];
+		u64 size;
+	};
+
+	struct HashDatabaseEntry
+	{
+		std::string serial;
+		std::string name;
+		std::string version;
+		std::vector<TrackHash> tracks;
+	};
+
+	bool loadHashDatabase();
+	void unloadHashDatabase();
+	const HashDatabaseEntry* lookupHash(const TrackHash* tracks, size_t num_tracks, bool* tracks_matched, std::string* match_error);
+}; // namespace GameDatabase

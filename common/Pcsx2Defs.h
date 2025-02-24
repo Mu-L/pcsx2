@@ -1,172 +1,100 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2010  PCSX2 Dev Team
- *
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
-#ifdef __CYGWIN__
-#define __linux__
-#endif
-
-// make sure __POSIX__ is defined for all systems where we assume POSIX
-// compliance
-#if defined(__linux__) || defined(__APPLE__) || defined(__unix__) || defined(__CYGWIN__) || defined(__LINUX__)
-#if !defined(__POSIX__)
-#define __POSIX__ 1
-#endif
-#endif
-
 #include "Pcsx2Types.h"
 
-#include "common/emitter/x86_intrin.h"
-
-// Renamed ARRAYSIZE to ArraySize -- looks nice and gets rid of Windows.h conflicts (air)
-// Notes: I'd have used ARRAY_SIZE instead but ran into cross-platform lib conflicts with
-// that as well.  >_<
-#ifndef ArraySize
-#define ArraySize(x) (sizeof(x) / sizeof((x)[0]))
-#endif
+#include <bit>
+#include <cstddef>
 
 // --------------------------------------------------------------------------------------
 // Dev / Debug conditionals - Consts for using if() statements instead of uglier #ifdef.
 // --------------------------------------------------------------------------------------
-// Note: Using if() optimizes nicely in Devel and Release builds, but will generate extra
-// code overhead in debug builds (since debug neither inlines, nor optimizes out const-
-// level conditionals).  Normally not a concern, but if you stick if( IsDevbuild ) in
-// some tight loops it will likely make debug builds unusably slow.
-//
 #ifdef PCSX2_DEVBUILD
-static const bool IsDevBuild = true;
+static constexpr bool IsDevBuild = true;
 #else
-static const bool IsDevBuild = false;
+static constexpr bool IsDevBuild = false;
 #endif
 
 #ifdef PCSX2_DEBUG
-static const bool IsDebugBuild = true;
+static constexpr bool IsDebugBuild = true;
 #else
-static const bool IsDebugBuild = false;
+static constexpr bool IsDebugBuild = false;
 #endif
 
-#ifdef PCSX2_DEBUG
-#define pxDebugCode(code) code
+// Defines the memory page size for the target platform at compilation.
+#if defined(OVERRIDE_HOST_PAGE_SIZE)
+	static constexpr unsigned int __pagesize = OVERRIDE_HOST_PAGE_SIZE;
+	static constexpr unsigned int __pagemask = __pagesize - 1;
+	static constexpr unsigned int __pageshift = std::bit_width(__pagemask);
+#elif defined(_M_ARM64)
+	// Apple Silicon uses 16KB pages and 128 byte cache lines.
+	static constexpr unsigned int __pagesize = 0x4000;
+	static constexpr unsigned int __pageshift = 14;
+	static constexpr unsigned int __pagemask = __pagesize - 1;
 #else
-#define pxDebugCode(code)
+	// X86 uses a 4KB granularity and 64 byte cache lines.
+	static constexpr unsigned int __pagesize = 0x1000;
+	static constexpr unsigned int __pageshift = 12;
+	static constexpr unsigned int __pagemask = __pagesize - 1;
+#endif
+#if defined(OVERRIDE_HOST_CACHE_LINE_SIZE)
+	static constexpr unsigned int __cachelinesize = OVERRIDE_HOST_CACHE_LINE_SIZE;
+#elif defined(_M_ARM64)
+	static constexpr unsigned int __cachelinesize = 128;
+#else
+	static constexpr unsigned int __cachelinesize = 64;
 #endif
 
-#ifdef PCSX2_DEVBUILD
-#define pxDevelCode(code) code
-#else
-#define pxDevelCode(code)
-#endif
-
-#if defined(PCSX2_DEBUG) || defined(PCSX2_DEVBUILD)
-#define pxReleaseCode(code)
-#define pxNonReleaseCode(code) code
-#else
-#define pxReleaseCode(code) code
-#define pxNonReleaseCode(code)
-#endif
-
-// --------------------------------------------------------------------------------------
-// __aligned / __aligned16 / __pagealigned
-// --------------------------------------------------------------------------------------
-// GCC Warning!  The GCC linker (LD) typically fails to assure alignment of class members.
-// If you want alignment to be assured, the variable must either be a member of a struct
-// or a static global.
-//
-// __pagealigned is equivalent to __aligned(0x1000), and is used to align a dynarec code
-// buffer to a page boundary (allows the use of execution-enabled mprotect).
-//
-// General Performance Warning: Any function that specifies alignment on a local (stack)
-// variable will have to align the stack frame on enter, and restore it on exit (adds
-// overhead).  Furthermore, compilers cannot inline functions that have aligned local
-// vars.  So use local var alignment with much caution.
-//
-
-// Defines the memory page size for the target platform at compilation.  All supported platforms
-// (which means Intel only right now) have a 4k granularity.
-#define PCSX2_PAGESIZE 0x1000
-static const int __pagesize = PCSX2_PAGESIZE;
+// We use 4KB alignment for globals for both Apple and x86 platforms, since computing the
+// address on ARM64 is a single instruction (adrp).
+static constexpr unsigned int __pagealignsize = 0x1000;
 
 // --------------------------------------------------------------------------------------
 //  Microsoft Visual Studio
 // --------------------------------------------------------------------------------------
 #ifdef _MSC_VER
 
-// Using these breaks compat with VC2005; so we're not using it yet.
-//#	define __pack_begin		__pragma(pack(1))
-//#	define __pack_end		__pragma(pack())
-
-// This is the 2005/earlier compatible packing define, which must be used in conjunction
-// with #ifdef _MSC_VER/#pragma pack() directives (ugly).
-#define __packed
-
-#define __aligned(alig) __declspec(align(alig))
-#define __aligned16 __declspec(align(16))
-#define __aligned32 __declspec(align(32))
-#define __pagealigned __declspec(align(PCSX2_PAGESIZE))
-
+#define __forceinline_odr __forceinline
 #define __noinline __declspec(noinline)
 #define __noreturn __declspec(noreturn)
 
-// Don't know if there are Visual C++ equivalents of these.
-#define likely(x) (!!(x))
-#define unlikely(x) (!!(x))
-
-#define CALLBACK __stdcall
+#define RESTRICT __restrict
+#define ASSUME(x) __assume(x)
 
 #else
 
 // --------------------------------------------------------------------------------------
-//  GCC / Intel Compilers Section
+//  GCC / Clang Compilers Section
 // --------------------------------------------------------------------------------------
 
-#ifndef __packed
-#define __packed __attribute__((packed))
+// SysV ABI passes vector parameters through registers unconditionally.
+#ifndef _WIN32
+#define __vectorcall
 #endif
-#ifndef __aligned
-#define __aligned(alig) __attribute__((aligned(alig)))
-#endif
-#define __aligned16 __attribute__((aligned(16)))
-#define __aligned32 __attribute__((aligned(32)))
-#define __pagealigned __attribute__((aligned(PCSX2_PAGESIZE)))
-
-#define __assume(cond) ((void)0) // GCC has no equivalent for __assume
-#define CALLBACK __attribute__((stdcall))
 
 // Inlining note: GCC needs ((unused)) attributes defined on inlined functions to suppress
 // warnings when a static inlined function isn't used in the scope of a single file (which
 // happens *by design* like all the friggen time >_<)
 
-#ifndef __fastcall
-#define __fastcall __attribute__((fastcall))
-#endif
-#define __vectorcall __fastcall
-#define _inline __inline__ __attribute__((unused))
-#ifdef NDEBUG
+// __forceinline_odr is for member functions that are defined in headers. MSVC can't specify
+// inline and __forceinline at the same time, but it required to not get ODR errors in GCC.
+
 #define __forceinline __attribute__((always_inline, unused))
-#else
-#define __forceinline __attribute__((unused))
-#endif
-#ifndef __noinline
+#define __forceinline_odr __forceinline inline
 #define __noinline __attribute__((noinline))
-#endif
-#ifndef __noreturn
 #define __noreturn __attribute__((noreturn))
-#endif
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+
+#define RESTRICT __restrict__
+
+#define ASSUME(x) \
+	do \
+	{ \
+		if (!(x)) \
+			__builtin_unreachable(); \
+	} while (0)
+
 #endif
 
 // --------------------------------------------------------------------------------------
@@ -180,12 +108,58 @@ static const int __pagesize = PCSX2_PAGESIZE;
 // from Devel builds is likely useful; but which should be inlined in an optimized Release
 // environment.
 //
+#define __fi __forceinline
 #ifdef PCSX2_DEVBUILD
-#define __releaseinline
+#define __ri
 #else
-#define __releaseinline __forceinline
+#define __ri __fi
 #endif
 
-#define __ri __releaseinline
-#define __fi __forceinline
-#define __fc __fastcall
+//////////////////////////////////////////////////////////////////////////////////////////
+// Safe deallocation macros -- checks pointer validity (non-null) when needed, and sets
+// pointer to null after deallocation.
+
+#define safe_delete(ptr) (delete (ptr), (ptr) = nullptr)
+#define safe_delete_array(ptr) (delete[] (ptr), (ptr) = nullptr)
+#define safe_free(ptr) (std::free(ptr), (ptr) = nullptr)
+
+// --------------------------------------------------------------------------------------
+//  DeclareNoncopyableObject
+// --------------------------------------------------------------------------------------
+// This macro provides an easy and clean method for ensuring objects are not copyable.
+// Simply add the macro to the head or tail of your class declaration, and attempts to
+// copy the class will give you a moderately obtuse compiler error.
+//
+#ifndef DeclareNoncopyableObject
+#define DeclareNoncopyableObject(classname) \
+public: \
+	classname(const classname&) = delete; \
+	classname& operator=(const classname&) = delete
+#endif
+
+// --------------------------------------------------------------------------------------
+//  Handy Human-readable constants for common immediate values (_16kb -> _4gb)
+
+static constexpr sptr _1kb = 1024 * 1;
+static constexpr sptr _4kb = _1kb * 4;
+static constexpr sptr _16kb = _1kb * 16;
+static constexpr sptr _32kb = _1kb * 32;
+static constexpr sptr _64kb = _1kb * 64;
+static constexpr sptr _128kb = _1kb * 128;
+static constexpr sptr _256kb = _1kb * 256;
+
+static constexpr s64 _1mb = 1024 * 1024;
+static constexpr s64 _8mb = _1mb * 8;
+static constexpr s64 _16mb = _1mb * 16;
+static constexpr s64 _32mb = _1mb * 32;
+static constexpr s64 _64mb = _1mb * 64;
+static constexpr s64 _256mb = _1mb * 256;
+static constexpr s64 _1gb = _1mb * 1024;
+static constexpr s64 _4gb = _1gb * 4;
+
+// Disable some spammy warnings which wx appeared to disable.
+// We probably should fix these at some point.
+#ifdef _MSC_VER
+#pragma warning(disable : 4244) // warning C4244: 'initializing': conversion from 'uptr' to 'uint', possible loss of data
+#pragma warning(disable : 4267) // warning C4267: 'initializing': conversion from 'size_t' to 'uint', possible loss of data
+#endif

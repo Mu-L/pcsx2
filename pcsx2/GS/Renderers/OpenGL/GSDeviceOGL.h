@@ -1,32 +1,19 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2021 PCSX2 Dev Team
- *
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
 #include "GS/Renderers/Common/GSDevice.h"
-#include "GSTextureOGL.h"
+#include "GS/Renderers/OpenGL/GLProgram.h"
+#include "GS/Renderers/OpenGL/GLShaderCache.h"
+#include "GS/Renderers/OpenGL/GLState.h"
+#include "GS/Renderers/OpenGL/GLStreamBuffer.h"
+#include "GS/Renderers/OpenGL/GSTextureOGL.h"
 #include "GS/GS.h"
-#include "GSVertexArrayOGL.h"
-#include "GSUniformBufferOGL.h"
-#include "GSShaderOGL.h"
-#include "GLState.h"
 
-#ifdef ENABLE_OGL_DEBUG_MEM_BW
-extern uint64 g_real_texture_upload_byte;
-extern uint64 g_vertex_upload_byte;
-#endif
+#include "common/HashCombine.h"
+
+class GLContext;
 
 class GSDepthStencilOGL
 {
@@ -122,533 +109,262 @@ public:
 class GSDeviceOGL final : public GSDevice
 {
 public:
-	struct alignas(32) VSConstantBuffer
+	using VSSelector = GSHWDrawConfig::VSSelector;
+	using PSSelector = GSHWDrawConfig::PSSelector;
+	using PSSamplerSelector = GSHWDrawConfig::SamplerSelector;
+	using OMDepthStencilSelector = GSHWDrawConfig::DepthStencilSelector;
+	using OMColorMaskSelector = GSHWDrawConfig::ColorMaskSelector;
+
+	struct alignas(16) ProgramSelector
 	{
-		GSVector4 Vertex_Scale_Offset;
+		PSSelector ps;
+		VSSelector vs;
+		u8 pad[3];
 
-		GSVector4 TextureOffset;
+		__fi bool operator==(const ProgramSelector& p) const { return BitEqual(*this, p); }
+		__fi bool operator!=(const ProgramSelector& p) const { return !BitEqual(*this, p); }
+	};
+	static_assert(sizeof(ProgramSelector) == 16, "Program selector is 16 bytes");
 
-		GSVector2 PointSize;
-		GSVector2i MaxDepth;
-
-		VSConstantBuffer()
+	struct ProgramSelectorHash
+	{
+		__fi std::size_t operator()(const ProgramSelector& p) const noexcept
 		{
-			Vertex_Scale_Offset = GSVector4::zero();
-			TextureOffset       = GSVector4::zero();
-			PointSize           = GSVector2(0);
-			MaxDepth            = GSVector2i(0);
-		}
-
-		__forceinline bool Update(const VSConstantBuffer* cb)
-		{
-			GSVector4i* a = (GSVector4i*)this;
-			GSVector4i* b = (GSVector4i*)cb;
-
-			if (!((a[0] == b[0]) & (a[1] == b[1]) & (a[2] == b[2])).alltrue())
-			{
-				a[0] = b[0];
-				a[1] = b[1];
-				a[2] = b[2];
-
-				return true;
-			}
-
-			return false;
+			std::size_t h = 0;
+			HashCombine(h, p.vs.key, p.ps.key_hi, p.ps.key_lo);
+			return h;
 		}
 	};
-
-	struct VSSelector
-	{
-		union
-		{
-			struct
-			{
-				uint32 int_fst : 1;
-				uint32 _free : 31;
-			};
-
-			uint32 key;
-		};
-
-		operator uint32() const { return key; }
-
-		VSSelector()
-			: key(0)
-		{
-		}
-		VSSelector(uint32 k)
-			: key(k)
-		{
-		}
-	};
-
-	struct GSSelector
-	{
-		union
-		{
-			struct
-			{
-				uint32 sprite : 1;
-				uint32 point  : 1;
-				uint32 line   : 1;
-
-				uint32 _free : 29;
-			};
-
-			uint32 key;
-		};
-
-		operator uint32() const { return key; }
-
-		GSSelector()
-			: key(0)
-		{
-		}
-		GSSelector(uint32 k)
-			: key(k)
-		{
-		}
-	};
-
-	struct alignas(32) PSConstantBuffer
-	{
-		GSVector4 FogColor_AREF;
-		GSVector4 WH;
-		GSVector4 TA_Af;
-		GSVector4i MskFix;
-		GSVector4i FbMask;
-
-		GSVector4 HalfTexel;
-		GSVector4 MinMax;
-		GSVector4 TC_OH_TS;
-		GSVector4 MaxDepth;
-
-		GSVector4 DitherMatrix[4];
-
-		PSConstantBuffer()
-		{
-			FogColor_AREF = GSVector4::zero();
-			HalfTexel     = GSVector4::zero();
-			WH            = GSVector4::zero();
-			TA_Af         = GSVector4::zero();
-			MinMax        = GSVector4::zero();
-			MskFix        = GSVector4i::zero();
-			TC_OH_TS      = GSVector4::zero();
-			FbMask        = GSVector4i::zero();
-			MaxDepth      = GSVector4::zero();
-
-			DitherMatrix[0] = GSVector4::zero();
-			DitherMatrix[1] = GSVector4::zero();
-			DitherMatrix[2] = GSVector4::zero();
-			DitherMatrix[3] = GSVector4::zero();
-		}
-
-		__forceinline bool Update(const PSConstantBuffer* cb)
-		{
-			GSVector4i* a = (GSVector4i*)this;
-			GSVector4i* b = (GSVector4i*)cb;
-
-			// if WH matches both HalfTexel and TC_OH_TS do too
-			if (!((a[0] == b[0]) & (a[1] == b[1]) & (a[2] == b[2]) & (a[3] == b[3]) & (a[4] == b[4]) & (a[6] == b[6])
-				& (a[8] == b[8]) & (a[9] == b[9]) & (a[10] == b[10]) & (a[11] == b[11]) & (a[12] == b[12])).alltrue())
-			{
-				// Note previous check uses SSE already, a plain copy will be faster than any memcpy
-				a[0] = b[0];
-				a[1] = b[1];
-				a[2] = b[2];
-				a[3] = b[3];
-				a[4] = b[4];
-				a[5] = b[5];
-				a[6] = b[6];
-
-				a[8] = b[8];
-
-				a[9] = b[9];
-				a[10] = b[10];
-				a[11] = b[11];
-				a[12] = b[12];
-
-				return true;
-			}
-
-			return false;
-		}
-	};
-
-	struct PSSelector
-	{
-		// Performance note: there are too many shader combinations
-		// It might hurt the performance due to frequent toggling worse it could consume
-		// a lots of memory.
-		union
-		{
-			struct
-			{
-				// *** Word 1
-				// Format
-				uint32 tex_fmt   : 4;
-				uint32 dfmt      : 2;
-				uint32 depth_fmt : 2;
-				// Alpha extension/Correction
-				uint32 aem : 1;
-				uint32 fba : 1;
-				// Fog
-				uint32 fog : 1;
-				// Flat/goround shading
-				uint32 iip : 1;
-				// Pixel test
-				uint32 date : 3;
-				uint32 atst : 3;
-				// Color sampling
-				uint32 fst : 1; // Investigate to do it on the VS
-				uint32 tfx : 3;
-				uint32 tcc : 1;
-				uint32 wms : 2;
-				uint32 wmt : 2;
-				uint32 ltf : 1;
-				// Shuffle and fbmask effect
-				uint32 shuffle  : 1;
-				uint32 read_ba  : 1;
-				uint32 write_rg : 1;
-				uint32 fbmask   : 1;
-
-				//uint32 _free1:0;
-
-				// *** Word 2
-				// Blend and Colclip
-				uint32 blend_a : 2;
-				uint32 blend_b : 2;
-				uint32 blend_c : 2;
-				uint32 blend_d : 2;
-				uint32 clr1    : 1; // useful?
-				uint32 hdr     : 1;
-				uint32 colclip : 1;
-				uint32 pabe    : 1;
-
-				// Others ways to fetch the texture
-				uint32 channel : 3;
-
-				// Dithering
-				uint32 dither : 2;
-
-				// Depth clamp
-				uint32 zclamp : 1;
-
-				// Hack
-				uint32 tcoffsethack : 1;
-				uint32 urban_chaos_hle : 1;
-				uint32 tales_of_abyss_hle : 1;
-				uint32 tex_is_fb : 1; // Jak Shadows
-				uint32 automatic_lod : 1;
-				uint32 manual_lod : 1;
-				uint32 point_sampler : 1;
-				uint32 invalid_tex0 : 1; // Lupin the 3rd
-
-				uint32 _free2 : 6;
-			};
-
-			uint64 key;
-		};
-
-		// FIXME is the & useful ?
-		operator uint64() const { return key; }
-
-		PSSelector()
-			: key(0)
-		{
-		}
-	};
-
-	struct PSSamplerSelector
-	{
-		union
-		{
-			struct
-			{
-				uint32 tau   : 1;
-				uint32 tav   : 1;
-				uint32 biln  : 1;
-				uint32 triln : 3;
-				uint32 aniso : 1;
-
-				uint32 _free : 25;
-			};
-
-			uint32 key;
-		};
-
-		operator uint32() { return key; }
-
-		PSSamplerSelector()
-			: key(0)
-		{
-		}
-		PSSamplerSelector(uint32 k)
-			: key(k)
-		{
-		}
-	};
-
-	struct OMDepthStencilSelector
-	{
-		union
-		{
-			struct
-			{
-				uint32 ztst : 2;
-				uint32 zwe  : 1;
-				uint32 date : 1;
-				uint32 date_one : 1;
-
-				uint32 _free : 27;
-			};
-
-			uint32 key;
-		};
-
-		// FIXME is the & useful ?
-		operator uint32() { return key; }
-
-		OMDepthStencilSelector()
-			: key(0)
-		{
-		}
-		OMDepthStencilSelector(uint32 k)
-			: key(k)
-		{
-		}
-	};
-
-	struct OMColorMaskSelector
-	{
-		union
-		{
-			struct
-			{
-				uint32 wr : 1;
-				uint32 wg : 1;
-				uint32 wb : 1;
-				uint32 wa : 1;
-
-				uint32 _free : 28;
-			};
-
-			struct
-			{
-				uint32 wrgba : 4;
-			};
-
-			uint32 key;
-		};
-
-		// FIXME is the & useful ?
-		operator uint32() { return key & 0xf; }
-
-		OMColorMaskSelector()
-			: key(0xF)
-		{
-		}
-		OMColorMaskSelector(uint32 c) { wrgba = c; }
-	};
-
-	struct alignas(32) MiscConstantBuffer
-	{
-		GSVector4i ScalingFactor;
-		GSVector4i ChannelShuffle;
-		GSVector4i EMOD_AC;
-
-		MiscConstantBuffer() { memset(this, 0, sizeof(*this)); }
-	};
-
-	static int m_shader_inst;
-	static int m_shader_reg;
 
 private:
-	int m_force_texture_clear;
-	int m_mipmap;
-	TriFiltering m_filter;
+	static constexpr u8 NUM_TIMESTAMP_QUERIES = 5;
 
-	static bool m_debug_gl_call;
-	static FILE* m_debug_gl_file;
+	std::unique_ptr<GLContext> m_gl_context;
 
-	bool m_disable_hw_gl_draw;
+	bool m_disable_download_pbo = false;
 
-	// Place holder for the GLSL shader code (to avoid useless reload)
-	std::vector<char> m_shader_tfx_vgs;
-	std::vector<char> m_shader_tfx_fs;
+	GLuint m_fbo = 0; // frame buffer container
+	GLuint m_fbo_read = 0; // frame buffer container only for reading
+	GLuint m_fbo_write = 0;	// frame buffer container only for writing
 
-	GLuint m_fbo; // frame buffer container
-	GLuint m_fbo_read; // frame buffer container only for reading
+	std::unique_ptr<GLStreamBuffer> m_texture_upload_buffer;
 
-	GSVertexBufferStateOGL* m_va; // state of the vertex buffer/array
+	std::unique_ptr<GLStreamBuffer> m_vertex_stream_buffer;
+	std::unique_ptr<GLStreamBuffer> m_index_stream_buffer;
+	GLuint m_expand_ibo = 0;
+	GLuint m_vao = 0;
+	GLuint m_expand_vao = 0;
+	GLenum m_draw_topology = 0;
+
+	std::unique_ptr<GLStreamBuffer> m_vertex_uniform_stream_buffer;
+	std::unique_ptr<GLStreamBuffer> m_fragment_uniform_stream_buffer;
+	GLint m_uniform_buffer_alignment = 0;
 
 	struct
 	{
-		GLuint ps[2]; // program object
-		GSUniformBufferOGL* cb; // uniform buffer object
+		GLProgram ps[2]; // program object
 	} m_merge_obj;
 
 	struct
 	{
-		GLuint ps[4]; // program object
-		GSUniformBufferOGL* cb; // uniform buffer object
+		GLProgram ps[NUM_INTERLACE_SHADERS]; // program object
 	} m_interlace;
 
 	struct
 	{
-		GLuint vs; // program object
-		GLuint ps[ShaderConvert_Count]; // program object
-		GLuint ln; // sampler object
-		GLuint pt; // sampler object
-		GSDepthStencilOGL* dss;
-		GSDepthStencilOGL* dss_write;
-		GSUniformBufferOGL* cb;
+		std::string vs;
+		GLProgram ps[static_cast<int>(ShaderConvert::Count)]; // program object
+		GLuint ln = 0; // sampler object
+		GLuint pt = 0; // sampler object
+		GSDepthStencilOGL* dss = nullptr;
+		GSDepthStencilOGL* dss_write = nullptr;
 	} m_convert;
+
+	GLProgram m_present[static_cast<int>(PresentShader::Count)];
 
 	struct
 	{
-		GLuint ps;
-		GSUniformBufferOGL* cb;
+		GLProgram ps;
 	} m_fxaa;
 
 	struct
 	{
-		GLuint ps;
-		GSUniformBufferOGL* cb;
-	} m_shaderfx;
-
-	struct
-	{
-		GSDepthStencilOGL* dss;
-		GSTexture* t;
+		GSDepthStencilOGL* dss = nullptr;
+		GLProgram primid_ps[4];
 	} m_date;
 
 	struct
 	{
-		GLuint ps;
+		GLProgram ps;
 	} m_shadeboost;
 
 	struct
 	{
-		uint16 last_query;
-		GLuint timer_query[1 << 16];
+		GLProgram upscale_ps;
+		GLProgram sharpen_ps;
+	} m_cas;
 
-		GLuint timer() { return timer_query[last_query]; }
-	} m_profiler;
+	struct
+	{
+		GLProgram ps;
+		GLuint vao = 0;
+	} m_imgui;
 
-	GLuint m_vs[1 << 1];
-	GLuint m_gs[1 << 3];
-	GLuint m_ps_ss[1 << 7];
-	GSDepthStencilOGL* m_om_dss[1 << 5];
-	std::unordered_map<uint64, GLuint> m_ps;
-	GLuint m_apitrace;
+	GLuint m_ps_ss[1 << 8];
+	GSDepthStencilOGL* m_om_dss[1 << 5] = {};
+	std::unordered_map<ProgramSelector, GLProgram, ProgramSelectorHash> m_programs;
+	GLShaderCache m_shader_cache;
 
-	GLuint m_palette_ss;
+	GLuint m_palette_ss = 0;
 
-	GSUniformBufferOGL* m_vs_cb;
-	GSUniformBufferOGL* m_ps_cb;
+	std::array<GLuint, NUM_TIMESTAMP_QUERIES> m_timestamp_queries = {};
+	float m_accumulated_gpu_time = 0.0f;
+	u8 m_read_timestamp_query = 0;
+	u8 m_write_timestamp_query = 0;
+	u8 m_waiting_timestamp_queries = 0;
+	bool m_timestamp_query_started = false;
+	bool m_gpu_timing_enabled = false;
 
-	VSConstantBuffer m_vs_cb_cache;
-	PSConstantBuffer m_ps_cb_cache;
-	MiscConstantBuffer m_misc_cb_cache;
+	GSHWDrawConfig::VSConstantBuffer m_vs_cb_cache;
+	GSHWDrawConfig::PSConstantBuffer m_ps_cb_cache;
 
-	std::unique_ptr<GSTexture> m_font;
+	std::string m_shader_tfx_vgs;
+	std::string m_shader_tfx_fs;
 
-	GSTexture* CreateSurface(int type, int w, int h, int format);
-	GSTexture* FetchSurface(int type, int w, int h, int format);
+	bool CheckFeatures(bool& buggy_pbo);
 
-	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, const GSVector4& c) final;
-	void DoInterlace(GSTexture* sTex, GSTexture* dTex, int shader, bool linear, float yoffset = 0) final;
-	void DoFXAA(GSTexture* sTex, GSTexture* dTex) final;
-	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex) final;
-	void DoExternalFX(GSTexture* sTex, GSTexture* dTex) final;
-	void RenderOsd(GSTexture* dt);
+	void SetSwapInterval();
+	void DestroyResources();
 
-	void OMAttachRt(GSTextureOGL* rt = NULL);
-	void OMAttachDs(GSTextureOGL* ds = NULL);
+	void CreateTimestampQueries();
+	void DestroyTimestampQueries();
+	void PopTimestampQuery();
+	void KickTimestampQuery();
+
+	GSTexture* CreateSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format) override;
+
+	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const bool linear) override;
+	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, bool linear, const InterlaceConstantBuffer& cb) override;
+
+	bool CompileFXAAProgram();
+	void DoFXAA(GSTexture* sTex, GSTexture* dTex) override;
+
+	bool CompileShadeBoostProgram();
+	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) override;
+
+	bool CreateCASPrograms();
+	bool DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only, const std::array<u32, NUM_CAS_CONSTANTS>& constants) override;
+
+	bool CreateImGuiProgram();
+	void RenderImGui();
+	void RenderBlankFrame();
+
+	void OMAttachRt(GSTexture* rt = nullptr);
+	void OMAttachDs(GSTexture* ds = nullptr);
 	void OMSetFBO(GLuint fbo);
 
-	uint16 ConvertBlendEnum(uint16 generic) final;
+	void DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect, const GSVector2i& ds);
 
 public:
-	GSShaderOGL* m_shader;
-
 	GSDeviceOGL();
 	virtual ~GSDeviceOGL();
 
-	void GenerateProfilerData();
+	__fi static GSDeviceOGL* GetInstance() { return static_cast<GSDeviceOGL*>(g_gs_device.get()); }
 
 	// Used by OpenGL, so the same calling convention is required.
-	static void APIENTRY DebugOutputToFile(GLenum gl_source, GLenum gl_type, GLuint id, GLenum gl_severity, GLsizei gl_length, const GLchar* gl_message, const void* userParam);
+	static void GLAPIENTRY DebugMessageCallback(GLenum gl_source, GLenum gl_type, GLuint id, GLenum gl_severity, GLsizei gl_length, const GLchar* gl_message, const void* userParam);
 
-	bool Create(const std::shared_ptr<GSWnd>& wnd);
-	bool Reset(int w, int h);
-	void Flip();
-	void SetVSync(int vsync);
+	__fi bool IsDownloadPBODisabled() const { return m_disable_download_pbo; }
+	__fi u32 GetFBORead() const { return m_fbo_read; }
+	__fi u32 GetFBOWrite() const { return m_fbo_write; }
+	__fi GLStreamBuffer* GetTextureUploadBuffer() const { return m_texture_upload_buffer.get(); }
+	void CommitClear(GSTexture* t, bool use_write_fbo);
 
-	void DrawPrimitive() final;
-	void DrawPrimitive(int offset, int count);
-	void DrawIndexedPrimitive() final;
-	void DrawIndexedPrimitive(int offset, int count) final;
-	inline void BeforeDraw();
-	inline void AfterDraw();
+	RenderAPI GetRenderAPI() const override;
+	bool HasSurface() const override;
 
-	void ClearRenderTarget(GSTexture* t, const GSVector4& c) final;
-	void ClearRenderTarget(GSTexture* t, uint32 c) final;
-	void ClearDepth(GSTexture* t) final;
-	void ClearStencil(GSTexture* t, uint8 c) final;
+	bool Create(GSVSyncMode vsync_mode, bool allow_present_throttle) override;
+	void Destroy() override;
 
-	void InitPrimDateTexture(GSTexture* rt, const GSVector4i& area);
-	void RecycleDateTexture();
+	bool UpdateWindow() override;
+	void ResizeWindow(s32 new_window_width, s32 new_window_height, float new_window_scale) override;
+	bool SupportsExclusiveFullscreen() const override;
+	void DestroySurface() override;
+	std::string GetDriverInfo() const override;
 
-	GSTexture* CopyOffscreen(GSTexture* src, const GSVector4& sRect, int w, int h, int format = 0, int ps_shader = 0) final;
+	void SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle) override;
 
-	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r) final;
-	void CopyRectConv(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, bool at_origin);
-	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, int shader = 0, bool linear = true) final;
-	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, GLuint ps, bool linear = true);
-	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, bool red, bool green, bool blue, bool alpha);
-	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, GLuint ps, int bs, OMColorMaskSelector cms, bool linear = true);
+	PresentResult BeginPresent(bool frame_skip) override;
+	void EndPresent() override;
 
-	void SetupDATE(GSTexture* rt, GSTexture* ds, const GSVertexPT1* vertices, bool datm);
+	bool SetGPUTimingEnabled(bool enabled) override;
+	float GetAndResetAccumulatedGPUTime() override;
 
-	void BeginScene() final {}
-	void EndScene() final;
+	void DrawPrimitive();
+	void DrawIndexedPrimitive();
+	void DrawIndexedPrimitive(int offset, int count);
 
+	std::unique_ptr<GSDownloadTexture> CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format) override;
+
+	GSTexture* InitPrimDateTexture(GSTexture* rt, const GSVector4i& area, SetDATM datm);
+
+	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY) override;
+
+	void PushDebugGroup(const char* fmt, ...) override;
+	void PopDebugGroup() override;
+	void InsertDebugMessage(DebugMessageCategory category, const char* fmt, ...) override;
+
+	// BlitRect *does* mess with GL state, be sure to re-bind.
+	void BlitRect(GSTexture* sTex, const GSVector4i& r, const GSVector2i& dsize, bool at_origin, bool linear);
+
+	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderConvert shader = ShaderConvert::COPY, bool linear = true) override;
+	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, bool linear = true);
+	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, bool red, bool green, bool blue, bool alpha, ShaderConvert shader = ShaderConvert::COPY) override;
+	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, bool alpha_blend, OMColorMaskSelector cms, bool linear = true);
+	void PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, PresentShader shader, float shaderTime, bool linear) override;
+	void UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize) override;
+	void ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM) override;
+	void FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor, const GSVector2i& clamp_min, const GSVector4& dRect) override;
+
+	void DrawMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvert shader) override;
+	void DoMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, const GSVector2& ds);
+
+	void RenderHW(GSHWDrawConfig& config) override;
+	void SendHWDraw(const GSHWDrawConfig& config, bool needs_barrier);
+
+	void SetupDATE(GSTexture* rt, GSTexture* ds, const GSVertexPT1* vertices, SetDATM datm);
+
+	void IASetVAO(GLuint vao);
 	void IASetPrimitiveTopology(GLenum topology);
 	void IASetVertexBuffer(const void* vertices, size_t count);
 	void IASetIndexBuffer(const void* index, size_t count);
 
-	void PSSetShaderResource(int i, GSTexture* sr) final;
-	void PSSetShaderResources(GSTexture* sr0, GSTexture* sr1) final;
+	void PSSetShaderResource(int i, GSTexture* sr);
 	void PSSetSamplerState(GLuint ss);
+	void ClearSamplerCache() override;
 
 	void OMSetDepthStencilState(GSDepthStencilOGL* dss);
-	void OMSetBlendState(uint8 blend_index = 0, uint8 blend_factor = 0, bool is_blend_constant = false, bool accumulation_blend = false);
-	void OMSetRenderTargets(GSTexture* rt, GSTexture* ds, const GSVector4i* scissor = NULL) final;
+	void OMSetBlendState(bool enable = false, GLenum src_factor = GL_ONE, GLenum dst_factor = GL_ZERO, GLenum op = GL_FUNC_ADD,
+		GLenum src_factor_alpha = GL_ONE, GLenum dst_factor_alpha = GL_ZERO, bool is_constant = false, u8 constant = 0);
+	void OMSetRenderTargets(GSTexture* rt, GSTexture* ds, const GSVector4i* scissor = nullptr);
 	void OMSetColorMaskState(OMColorMaskSelector sel = OMColorMaskSelector());
+	void OMUnbindTexture(GSTextureOGL* tex);
 
-	virtual bool HasColorSparse() { return GLLoader::found_compatible_GL_ARB_sparse_texture2; }
-	virtual bool HasDepthSparse() { return GLLoader::found_compatible_sparse_depth; }
+	void SetViewport(const GSVector2i& viewport);
+	void SetScissor(const GSVector4i& scissor);
 
-	void CreateTextureFX();
-	GLuint CompileVS(VSSelector sel);
-	GLuint CompileGS(GSSelector sel);
-	GLuint CompilePS(PSSelector sel);
+	bool CreateTextureFX();
+	std::string GetShaderSource(const std::string_view entry, GLenum type, const std::string_view glsl_h_code,
+		const std::string_view macro_sel = std::string_view());
+	std::string GenGlslHeader(const std::string_view entry, GLenum type, const std::string_view macro);
+	std::string GetVSSource(VSSelector sel);
+	std::string GetPSSource(const PSSelector& sel);
 	GLuint CreateSampler(PSSamplerSelector sel);
 	GSDepthStencilOGL* CreateDepthStencil(OMDepthStencilSelector dssel);
 
-	void SelfShaderTestPrint(const std::string& test, int& nb_shader);
-	void SelfShaderTestRun(const std::string& dir, const std::string& file, const PSSelector& sel, int& nb_shader);
-	void SelfShaderTest();
-
-	void SetupPipeline(const VSSelector& vsel, const GSSelector& gsel, const PSSelector& psel);
-	void SetupCB(const VSConstantBuffer* vs_cb, const PSConstantBuffer* ps_cb);
-	void SetupCBMisc(const GSVector4i& channel);
+	void SetupPipeline(const ProgramSelector& psel);
 	void SetupSampler(PSSamplerSelector ssel);
 	void SetupOM(OMDepthStencilSelector dssel);
 	GLuint GetSamplerID(PSSamplerSelector ssel);
 	GLuint GetPaletteSamplerID();
-
-	void Barrier(GLbitfield b);
 };

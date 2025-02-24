@@ -1,17 +1,5 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2010  PCSX2 Dev Team
- * 
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
@@ -30,7 +18,7 @@
 	} while (0)
 
 
-const __aligned16 u32 sse4_compvals[2][4] = {
+alignas(16) const u32 sse4_compvals[2][4] = {
 	{0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x7f7fffff}, //1111
 	{0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff}, //1111
 };
@@ -200,13 +188,16 @@ static bool doSafeSub(microVU& mVU, int opCase, int opType, bool isACC)
 }
 
 // Sets Up Ft Reg for Normal, BC, I, and Q Cases
-static void setupFtReg(microVU& mVU, xmm& Ft, xmm& tempFt, int opCase)
+static void setupFtReg(microVU& mVU, xmm& Ft, xmm& tempFt, int opCase, int clampType)
 {
 	opCase1
 	{
-		if (_XYZW_SS2)   { Ft = mVU.regAlloc->allocReg(_Ft_, 0, _X_Y_Z_W); tempFt = Ft; }
-		else if (clampE) { Ft = mVU.regAlloc->allocReg(_Ft_, 0, 0xf);      tempFt = Ft; }
-		else             { Ft = mVU.regAlloc->allocReg(_Ft_);              tempFt = xEmptyReg; }
+		// Based on mVUclamp2 -> mVUclamp1 below.
+		const bool willClamp = (clampE || ((clampType & cFt) && !clampE && (CHECK_VU_OVERFLOW(mVU.index) || CHECK_VU_SIGN_OVERFLOW(mVU.index))));
+
+		if (_XYZW_SS2)      { Ft = mVU.regAlloc->allocReg(_Ft_, 0, _X_Y_Z_W); tempFt = Ft; }
+		else if (willClamp) { Ft = mVU.regAlloc->allocReg(_Ft_, 0, 0xf);      tempFt = Ft; }
+		else                { Ft = mVU.regAlloc->allocReg(_Ft_);              tempFt = xEmptyReg;  }
 	}
 	opCase2
 	{
@@ -247,7 +238,7 @@ static void mVU_FMACa(microVU& mVU, int recPass, int opCase, int opType, bool is
 			return;
 
 		xmm Fs, Ft, ACC, tempFt;
-		setupFtReg(mVU, Ft, tempFt, opCase);
+		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
 		if (isACC)
 		{
@@ -278,7 +269,7 @@ static void mVU_FMACa(microVU& mVU, int recPass, int opCase, int opType, bool is
 				xPSHUF.D(ACC, ACC, shuffleSS(_X_Y_Z_W));
 			mVU.regAlloc->clearNeeded(ACC);
 		}
-		else if (opType < 3)
+		else if (opType < 3 || opType == 5) // Not Min/Max or is ADDi(5) (TODO: Reorganise this so its < 4 including ADDi)
 			mVUupdateFlags(mVU, Fs, tempFt);
 
 		mVU.regAlloc->clearNeeded(Fs); // Always Clear Written Reg First
@@ -300,7 +291,7 @@ static void mVU_FMACb(microVU& mVU, int recPass, int opCase, int opType, microOp
 	pass2
 	{
 		xmm Fs, Ft, ACC, tempFt;
-		setupFtReg(mVU, Ft, tempFt, opCase);
+		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
 		Fs = mVU.regAlloc->allocReg(_Fs_, 0, _X_Y_Z_W);
 		ACC = mVU.regAlloc->allocReg(32, 32, 0xf, false);
@@ -348,7 +339,7 @@ static void mVU_FMACc(microVU& mVU, int recPass, int opCase, microOpcode opEnum,
 	pass2
 	{
 		xmm Fs, Ft, ACC, tempFt;
-		setupFtReg(mVU, Ft, tempFt, opCase);
+		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
 		ACC = mVU.regAlloc->allocReg(32);
 		Fs = mVU.regAlloc->allocReg(_Fs_, _Fd_, _X_Y_Z_W);
@@ -385,7 +376,7 @@ static void mVU_FMACd(microVU& mVU, int recPass, int opCase, microOpcode opEnum,
 	pass2
 	{
 		xmm Fs, Ft, Fd, tempFt;
-		setupFtReg(mVU, Ft, tempFt, opCase);
+		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
 		Fs = mVU.regAlloc->allocReg(_Fs_,  0, _X_Y_Z_W);
 		Fd = mVU.regAlloc->allocReg(32, _Fd_, _X_Y_Z_W);

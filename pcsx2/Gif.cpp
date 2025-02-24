@@ -1,33 +1,17 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2010  PCSX2 Dev Team
- *
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
-#include "PrecompiledHeader.h"
 #include "Common.h"
-
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "Vif_Dma.h"
-
-#include "iR5900.h"
 
 // A three-way toggle used to determine if the GIF is stalling (transferring) or done (finished).
 // Should be a gifstate_t rather then int, but I don't feel like possibly interfering with savestates right now.
 
 
-__aligned16 GIF_Fifo gif_fifo;
-__aligned16 gifStruct gif;
+alignas(16) GIF_Fifo gif_fifo;
+alignas(16) gifStruct gif;
 
 static __fi void GifDMAInt(int cycles)
 {
@@ -83,12 +67,12 @@ bool CheckPaths()
 
 void GIF_Fifo::init()
 {
-	memzero(data);
+	std::memset(data, 0, sizeof(data));
 	fifoSize = 0;
 	gifRegs.stat.FQC = 0;
-	CSRreg.FIFO = CSR_FIFO_EMPTY;
+
 	gif.gifstate = GIF_STATE_READY;
-	gif.gspath3done = false;
+	gif.gspath3done = true;
 
 	gif.gscycles = 0;
 	gif.prevcycles = 0;
@@ -104,7 +88,7 @@ int GIF_Fifo::write_fifo(u32* pMem, int size)
 		return 0;
 	}
 
-	int transferSize = std::min(size, 16 - (int)fifoSize);
+	const int transferSize = std::min(size, 16 - (int)fifoSize);
 
 	int writePos = fifoSize * 4;
 
@@ -134,10 +118,7 @@ int GIF_Fifo::read_fifo()
 		return 0;
 	}
 
-	int readpos = 0;
-	int sizeRead = 0;
-
-	sizeRead = gifUnit.TransferGSPacketData(GIF_TRANS_DMA, (u8*)&data, fifoSize * 16) / 16; //returns the size actually read
+	const int sizeRead = gifUnit.TransferGSPacketData(GIF_TRANS_DMA, (u8*)&data, fifoSize * 16) / 16; //returns the size actually read
 
 	GIF_LOG("GIF FIFO Read %d QW from FIFO Current Size %d", sizeRead, fifoSize);
 
@@ -145,8 +126,8 @@ int GIF_Fifo::read_fifo()
 	{
 		if (sizeRead > 0)
 		{
-			int copyAmount = fifoSize - sizeRead;
-			readpos = sizeRead * 4;
+			const int copyAmount = fifoSize - sizeRead;
+			const int readpos = sizeRead * 4;
 
 			for (int i = 0; i < copyAmount; i++)
 				CopyQWC(&data[i * 4], &data[readpos + (i * 4)]);
@@ -189,24 +170,26 @@ __fi void gifCheckPathStatus(bool calledFromGIF)
 	// If GIF is running on it's own, let it handle its own timing.
 	if (calledFromGIF && gifch.chcr.STR)
 	{
-		if(gif_fifo.fifoSize == 16)
+		if (gif_fifo.fifoSize == 16)
 			GifDMAInt(16);
 		return;
 	}
+
+	// Required for Path3 Masking timing!
+	if (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_WAIT)
+		gifUnit.gifPath[GIF_PATH_3].state = GIF_PATH_IDLE;
+
 	if (gifRegs.stat.APATH == 3)
 	{
 		gifRegs.stat.APATH = 0;
 		gifRegs.stat.OPH = 0;
+
 		if (!calledFromGIF && (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_IDLE || gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_WAIT))
 		{
 			if (gifUnit.checkPaths(1, 1, 0))
 				gifUnit.Execute(false, true);
 		}
 	}
-
-	// Required for Path3 Masking timing!
-	if (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_WAIT)
-		gifUnit.gifPath[GIF_PATH_3].state = GIF_PATH_IDLE;
 
 	// GIF DMA isn't running but VIF might be waiting on PATH3 so resume it here
 	if (calledFromGIF && gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_IDLE)
@@ -248,6 +231,7 @@ __fi void gifInterrupt()
 			{
 				GifDMAInt(16);
 			}
+			CPU_SET_DMASTALL(DMAC_GIF, gifUnit.Path3Masked() || !gifUnit.CanDoPath3());
 			return;
 		}
 	}
@@ -263,6 +247,7 @@ __fi void gifInterrupt()
 	{
 		GIF_LOG("Path 3 Paused");
 		GifDMAInt(128);
+		CPU_SET_DMASTALL(DMAC_GIF, true);
 		if (gif_fifo.fifoSize == 16)
 			return;
 	}
@@ -275,23 +260,15 @@ __fi void gifInterrupt()
 		if (readSize)
 			GifDMAInt(readSize * BIAS);
 
-		gifCheckPathStatus(false);
-		// Double check as we might have read the fifo as it's ending the DMA
-		if (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_IDLE)
+		// The following is quite timing sensitive so we need to pause/resume the DMA in these certain scenarios
+		// If the DMA is masked/blocked and the fifo is full, no need to run the DMA
+		// If we just read from the fifo, we want to loop and not read more DMA
+		// If there is no DMA data waiting and the DMA is active, let the DMA progress until there is
+		if ((!CheckPaths() && gif_fifo.fifoSize == 16) || readSize)
 		{
-			if (vif1Regs.stat.VGW)
-			{
-				// Check if VIF is in a cycle or is currently "idle" waiting for GIF to come back.
-				if (!(cpuRegs.interrupt & (1 << DMAC_VIF1)))
-				{
-					CPU_INT(DMAC_VIF1, 1);
-				}
-			}
-		}
-		// If the dma has data waiting and there's something in the fifo, drain the fifo
-		// If the GIF is currently paused, check if the FIFO is full, otherwise fill it
-		if ((!CheckPaths() && gif_fifo.fifoSize == 16) || (readSize && gif_fifo.fifoSize < 16))
+			CPU_SET_DMASTALL(DMAC_GIF, gifUnit.Path3Masked() || !gifUnit.CanDoPath3());
 			return;
+		}
 	}
 
 	if (!(gifch.chcr.STR))
@@ -304,6 +281,7 @@ __fi void gifInterrupt()
 			Console.Warning("gs dma masked, re-scheduling...");
 			// Re-raise the int shortly in the future
 			GifDMAInt(64);
+			CPU_SET_DMASTALL(DMAC_GIF, true);
 			return;
 		}
 		GIFdma();
@@ -324,7 +302,7 @@ __fi void gifInterrupt()
 
 static u32 WRITERING_DMA(u32* pMem, u32 qwc)
 {
-	u32 originalQwc = qwc;
+	const u32 originalQwc = qwc;
 
 	if (gifRegs.stat.IMT)
 	{
@@ -333,10 +311,14 @@ static u32 WRITERING_DMA(u32* pMem, u32 qwc)
 		// so we can get away with transferring "most" of it when it's a big packet.
 		// Use Wallace and Gromit Project Zoo or The Suffering for testing
 		if (qwc > 64)
-			qwc = qwc - 64;
+			qwc = qwc * 0.5f;
 		else
 			qwc = std::min(qwc, 8u);
 	}
+	// If the packet is larger than 8qw, try to time the packet somewhat so any "finish" signals don't fire way too early and GIF syncs with other units.
+	// (Mana Khemia exhibits flickering characters without).
+	else if (qwc > 8)
+		qwc -= 8;
 
 	uint size;
 
@@ -370,7 +352,7 @@ static __fi void GIFchain()
 		return;
 	}
 
-	int transferred = WRITERING_DMA((u32*)pMem, gifch.qwc);
+	const int transferred = WRITERING_DMA((u32*)pMem, gifch.qwc);
 	gif.gscycles += transferred * BIAS;
 
 	if (!gifUnit.Path3Masked() || (gif_fifo.fifoSize < 16))
@@ -402,17 +384,6 @@ static __fi tDMA_TAG* ReadTag()
 	return ptag;
 }
 
-static __fi tDMA_TAG* ReadTag2()
-{
-	tDMA_TAG* ptag = dmaGetAddr(gifch.tadr, false); // Set memory pointer to TADR
-
-	gifch.unsafeTransfer(ptag);
-	gifch.madr = ptag[1]._u32;
-
-	gif.gspath3done = hwDmacSrcChainWithStack(gifch, ptag->ID);
-	return ptag;
-}
-
 void GIFdma()
 {
 	while (gifch.qwc > 0 || !gif.gspath3done)
@@ -422,8 +393,9 @@ void GIFdma()
 
 		if (gifRegs.ctrl.PSE)
 		{ // Temporarily stop
-			Console.WriteLn("Gif dma temp paused? (non MFIFO GIF)");
+			DevCon.WriteLn("Gif dma paused by PSE bit.");
 			GifDMAInt(16);
+			CPU_SET_DMASTALL(DMAC_GIF, true);
 			return;
 		}
 
@@ -433,6 +405,7 @@ void GIFdma()
 			if ((gifch.madr + (gifch.qwc * 16)) > dmacRegs.stadr.ADDR)
 			{
 				GifDMAInt(4);
+				CPU_SET_DMASTALL(DMAC_GIF, true);
 				gif.gscycles = 0;
 				return;
 			}
@@ -464,6 +437,7 @@ void GIFdma()
 					hwDmacIrq(DMAC_STALL_SIS);
 					GifDMAInt(128);
 					gif.gscycles = 0;
+					CPU_SET_DMASTALL(DMAC_GIF, true);
 					return;
 				}
 			}
@@ -479,6 +453,7 @@ void GIFdma()
 		if (gifch.qwc > 0) // Normal Mode
 		{
 			GIFchain(); // Transfers the data set by the switch
+			CPU_SET_DMASTALL(DMAC_GIF, gifUnit.Path3Masked() || !gifUnit.CanDoPath3());
 			return;
 		}
 	}
@@ -492,7 +467,7 @@ void dmaGIF()
 	// DevCon.Warning("dmaGIFstart chcr = %lx, madr = %lx, qwc  = %lx\n tadr = %lx, asr0 = %lx, asr1 = %lx", gifch.chcr._u32, gifch.madr, gifch.qwc, gifch.tadr, gifch.asr0, gifch.asr1);
 
 	gif.gspath3done = false; // For some reason this doesn't clear? So when the system starts the thread, we will clear it :)
-
+	CPU_SET_DMASTALL(DMAC_GIF, false);
 	if (gifch.chcr.MOD == NORMAL_MODE)
 	{ // Else it really is a normal transfer and we want to quit, else it gets confused with chains
 		gif.gspath3done = true;
@@ -537,7 +512,7 @@ static u32 QWCinGIFMFIFO(u32 DrainADDR)
 
 static __fi bool mfifoGIFrbTransfer()
 {
-	u32 qwc = std::min(QWCinGIFMFIFO(gifch.madr), gifch.qwc);
+	const u32 qwc = std::min(QWCinGIFMFIFO(gifch.madr), gifch.qwc);
 
 	if (qwc == 0) // Either gifch.qwc is 0 (shouldn't get here) or the FIFO is empty.
 		return true;
@@ -546,27 +521,23 @@ static __fi bool mfifoGIFrbTransfer()
 	if (src == NULL)
 		return false;
 
-	u32 MFIFOUntilEnd = ((dmacRegs.rbor.ADDR + dmacRegs.rbsr.RMSK + 16) - gifch.madr) >> 4;
-	bool needWrap = MFIFOUntilEnd < qwc;
-	u32 firstTransQWC = needWrap ? MFIFOUntilEnd : qwc;
-	u32 transferred;
-
-	transferred = WRITERING_DMA((u32*)src, firstTransQWC); // First part
+	const u32 MFIFOUntilEnd = ((dmacRegs.rbor.ADDR + dmacRegs.rbsr.RMSK + 16) - gifch.madr) >> 4;
+	const bool needWrap = MFIFOUntilEnd < qwc;
+	const u32 firstTransQWC = needWrap ? MFIFOUntilEnd : qwc;
+	const u32 transferred = WRITERING_DMA((u32*)src, firstTransQWC); // First part
 
 	gifch.madr = dmacRegs.rbor.ADDR + (gifch.madr & dmacRegs.rbsr.RMSK);
 	gifch.tadr = dmacRegs.rbor.ADDR + (gifch.tadr & dmacRegs.rbsr.RMSK);
 
 	if (needWrap && transferred == MFIFOUntilEnd)
 	{
-		// Need to do second transfer to wrap around
-		u32 transferred2;
-		uint secondTransQWC = qwc - MFIFOUntilEnd;
-
 		src = (u8*)PSM(dmacRegs.rbor.ADDR);
 		if (src == NULL)
 			return false;
 
-		transferred2 = WRITERING_DMA((u32*)src, secondTransQWC); // Second part
+		// Need to do second transfer to wrap around
+		const uint secondTransQWC = qwc - MFIFOUntilEnd;
+		const u32 transferred2 = WRITERING_DMA((u32*)src, secondTransQWC); // Second part
 
 		gif.mfifocycles += (transferred2 + transferred) * 2;
 	}
@@ -660,13 +631,13 @@ void mfifoGifMaskMem(int id)
 
 void mfifoGIFtransfer()
 {
-	tDMA_TAG* ptag;
 	gif.mfifocycles = 0;
 
 	if (gifRegs.ctrl.PSE)
 	{ // Temporarily stop
-		Console.WriteLn("Gif dma temp paused?");
+		DevCon.WriteLn("Gif MFIFO dma paused by PSE bit.");
 		CPU_INT(DMAC_MFIFO_GIF, 16);
+		CPU_SET_DMASTALL(DMAC_MFIFO_GIF, true);
 		return;
 	}
 
@@ -679,10 +650,11 @@ void mfifoGIFtransfer()
 			SPR_LOG("GIF FIFO EMPTY before tag read");
 			gif.gifstate = GIF_STATE_EMPTY;
 			GifDMAInt(4);
+			CPU_SET_DMASTALL(DMAC_MFIFO_GIF, true);
 			return;
 		}
 
-		ptag = dmaGetAddr(gifch.tadr, false);
+		tDMA_TAG* ptag = dmaGetAddr(gifch.tadr, false);
 		gifch.unsafeTransfer(ptag);
 		gifch.madr = ptag[1]._u32;
 
@@ -727,6 +699,7 @@ void gifMFIFOInterrupt()
 	{ // GIF not in MFIFO anymore, come out.
 		DevCon.WriteLn("GIF Leaving MFIFO - Report if any errors");
 		gifInterrupt();
+		CPU_SET_DMASTALL(DMAC_MFIFO_GIF, true);
 		return;
 	}
 
@@ -747,6 +720,7 @@ void gifMFIFOInterrupt()
 			{
 				GifDMAInt(16);
 			}
+			CPU_SET_DMASTALL(DMAC_MFIFO_GIF, gifUnit.Path3Masked() || !gifUnit.CanDoPath3());
 			return;
 		}
 	}
@@ -754,28 +728,8 @@ void gifMFIFOInterrupt()
 	if (gifUnit.gsSIGNAL.queued)
 	{
 		GifDMAInt(128);
+		CPU_SET_DMASTALL(DMAC_MFIFO_GIF, true);
 		return;
-	}
-
-	gifCheckPathStatus(false);
-
-	if (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_IDLE)
-	{
-		if (vif1Regs.stat.VGW)
-		{
-			// Check if VIF is in a cycle or is currently "idle" waiting for GIF to come back.
-			if (!(cpuRegs.interrupt & (1 << DMAC_VIF1)))
-				CPU_INT(DMAC_VIF1, 1);
-
-			// Make sure it loops if the GIF packet is empty to prepare for the next packet
-			// or end if it was the end of a packet.
-			// This must trigger after VIF retriggers as VIf might instantly mask Path3
-			if (!gifUnit.Path3Masked() || gifch.qwc == 0)
-			{
-				GifDMAInt(16);
-			}
-			return;
-		}
 	}
 
 	// If there's something in the FIFO and we can do PATH3, empty the FIFO.
@@ -786,24 +740,15 @@ void gifMFIFOInterrupt()
 		if (readSize)
 			GifDMAInt(readSize * BIAS);
 
-		gifCheckPathStatus(false);
-		// Double check as we might have read the fifo as it's ending the DMA
-		if (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_IDLE)
+		// The following is quite timing sensitive so we need to pause/resume the DMA in these certain scenarios
+		// If the DMA is masked/blocked and the fifo is full, no need to run the DMA
+		// If we just read from the fifo, we want to loop and not read more DMA
+		// If there is no DMA data waiting and the DMA is active, let the DMA progress until there is
+		if ((!CheckPaths() && gif_fifo.fifoSize == 16) || readSize)
 		{
-			if (vif1Regs.stat.VGW)
-			{
-				//Check if VIF is in a cycle or is currently "idle" waiting for GIF to come back.
-				if (!(cpuRegs.interrupt & (1 << DMAC_VIF1)))
-				{
-					CPU_INT(DMAC_VIF1, 1);
-				}
-			}
-		}
-
-		// If the dma has data waiting and there's something in the fifo, drain the fifo
-		// If the GIF is currently paused, check if the FIFO is full, otherwise fill it
-		if ((!CheckPaths() && gif_fifo.fifoSize == 16) || (readSize && gif_fifo.fifoSize < 16))
+			CPU_SET_DMASTALL(DMAC_MFIFO_GIF, gifUnit.Path3Masked() || !gifUnit.CanDoPath3());
 			return;
+		}
 	}
 
 	if (!gifch.chcr.STR)
@@ -815,13 +760,16 @@ void gifMFIFOInterrupt()
 		FireMFIFOEmpty();
 
 		if (gifch.qwc > 0 || !gif.gspath3done)
+		{
+			CPU_SET_DMASTALL(DMAC_MFIFO_GIF, true);
 			return;
+		}
 	}
 
 	if (gifch.qwc > 0 || !gif.gspath3done)
 	{
-
 		mfifoGIFtransfer();
+		CPU_SET_DMASTALL(DMAC_MFIFO_GIF, gifUnit.Path3Masked() || !gifUnit.CanDoPath3());
 		return;
 	}
 
@@ -832,19 +780,20 @@ void gifMFIFOInterrupt()
 	gifRegs.stat.FQC = gif_fifo.fifoSize;
 	CalculateFIFOCSR();
 	hwDmacIrq(DMAC_GIF);
-
+	CPU_SET_DMASTALL(DMAC_MFIFO_GIF, false);
 	if (gif_fifo.fifoSize)
 		GifDMAInt(8 * BIAS);
 	DMA_LOG("GIF MFIFO DMA End");
 }
 
-void SaveStateBase::gifDmaFreeze()
+bool SaveStateBase::gifDmaFreeze()
 {
 	// Note: mfifocycles is not a persistent var, so no need to save it here.
-	FreezeTag("GIFdma");
-	Freeze(gif.gifstate);
-	Freeze(gif.gifqwc);
-	Freeze(gif.gspath3done);
-	Freeze(gif.gscycles);
+	if (!FreezeTag("GIFdma"))
+		return false;
+
+	Freeze(gif);
 	Freeze(gif_fifo);
+
+	return IsOkay();
 }

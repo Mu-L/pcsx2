@@ -95,21 +95,14 @@ Comments) 1950 to 1952 in the files http://tools.ietf.org/html/rfc1950
    index in a file.
  */
 
-#ifndef __ZLIB_INDEXED_H__
-#define __ZLIB_INDEXED_H__
+#pragma once
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __POSIX__
 #include <zlib.h>
-#else
-#include <zlib/zlib.h>
-#endif
 
-#include "CompressedFileReaderUtils.h"
-
-#define local static
+#include "common/FileSystem.h"
 
 //#define SPAN (1048576L)  /* desired distance between access points */
 #define WINSIZE 32768U    /* sliding window size */
@@ -122,8 +115,8 @@ Comments) 1950 to 1952 in the files http://tools.ietf.org/html/rfc1950
 /* access point entry */
 struct point
 {
-	PX_off_t out;                  /* corresponding offset in uncompressed data */
-	PX_off_t in;                   /* offset in input file of first full byte */
+	s64 out;                  /* corresponding offset in uncompressed data */
+	s64 in;                   /* offset in input file of first full byte */
 	int bits;                      /* number of bits (1-7) from byte at in - 1, or 0 */
 	unsigned char window[WINSIZE]; /* preceding 32K of uncompressed data */
 }
@@ -142,7 +135,7 @@ struct access
 	struct point* list; /* allocated list */
 
 	s32 span;                   /* once the index is built, holds the span size used to build it */
-	PX_off_t uncompressed_size; /* filled by build_index */
+	s64 uncompressed_size; /* filled by build_index */
 }
 #ifndef _WIN32
 __attribute__((packed))
@@ -156,7 +149,7 @@ typedef struct access Access;
 #endif
 
 /* Deallocate an index built by build_index() */
-local void free_index(struct access* index)
+static inline void free_index(struct access* index)
 {
 	if (index != NULL)
 	{
@@ -167,8 +160,8 @@ local void free_index(struct access* index)
 
 /* Add an entry to the access point list.  If out of memory, deallocate the
    existing list and return NULL. */
-local struct access* addpoint(struct access* index, int bits,
-							  PX_off_t in, PX_off_t out, unsigned left, unsigned char* window)
+static inline struct access* addpoint(struct access* index, int bits,
+							  s64 in, s64 out, unsigned left, unsigned char* window)
 {
 	struct point* next;
 
@@ -224,11 +217,11 @@ local struct access* addpoint(struct access* index, int bits,
    returns the number of access points on success (>= 1), Z_MEM_ERROR for out
    of memory, Z_DATA_ERROR for an error in the input file, or Z_ERRNO for a
    file read error.  On success, *built points to the resulting index. */
-local int build_index(FILE* in, PX_off_t span, struct access** built)
+static inline int build_index(FILE* in, s64 span, struct access** built)
 {
 	int ret;
-	PX_off_t totin, totout, totPrinted; /* our own total counters to avoid 4GB limit */
-	PX_off_t last;                      /* totout value of last access point */
+	s64 totin, totout, totPrinted; /* our own total counters to avoid 4GB limit */
+	s64 last;                      /* totout value of last access point */
 	struct access* index;               /* access points being generated */
 	z_stream strm;
 	unsigned char input[CHUNK];
@@ -344,13 +337,13 @@ build_index_error:
 
 typedef struct zstate
 {
-	PX_off_t out_offset;
-	PX_off_t in_offset;
+	s64 out_offset;
+	s64 in_offset;
 	z_stream strm;
 	int isValid;
 } Zstate;
 
-static inline PX_off_t getInOffset(zstate* state)
+static inline s64 getInOffset(zstate* state)
 {
 	return state->in_offset;
 }
@@ -362,7 +355,7 @@ static inline PX_off_t getInOffset(zstate* state)
    should not return a data error unless the file was modified since the index
    was generated.  extract() may also return Z_ERRNO if there is an error on
    reading or seeking the input file. */
-local int extract(FILE* in, struct access* index, PX_off_t offset,
+static inline int extract(FILE* in, struct access* index, s64 offset,
 				  unsigned char* buf, int len, zstate* state)
 {
 	int ret, skip;
@@ -386,7 +379,7 @@ local int extract(FILE* in, struct access* index, PX_off_t offset,
 	if (state->isValid)
 	{
 		state->isValid = 0; // we took control over strm. revalidate when/if we give it back
-		PX_fseeko(in, state->in_offset, SEEK_SET);
+		FileSystem::FSeek64(in, state->in_offset, SEEK_SET);
 		state->strm.avail_in = 0;
 		offset = 0;
 		skip = 1;
@@ -408,7 +401,7 @@ local int extract(FILE* in, struct access* index, PX_off_t offset,
 		ret = inflateInit2(&state->strm, -15); /* raw inflate */
 		if (ret != Z_OK)
 			return ret;
-		ret = PX_fseeko(in, here->in - (here->bits ? 1 : 0), SEEK_SET);
+		ret = FileSystem::FSeek64(in, here->in - (here->bits ? 1 : 0), SEEK_SET);
 		if (ret == -1)
 			goto extract_ret;
 		if (here->bits)
@@ -456,7 +449,7 @@ local int extract(FILE* in, struct access* index, PX_off_t offset,
 		{
 			if (state->strm.avail_in == 0)
 			{
-				state->in_offset = PX_ftello(in);
+				state->in_offset = FileSystem::FTell64(in);
 				state->strm.avail_in = fread(input, 1, CHUNK, in);
 				if (ferror(in))
 				{
@@ -504,5 +497,3 @@ extract_ret:
 
 	return ret;
 }
-
-#endif /* __ZLIB_INDEXED_H__ */
