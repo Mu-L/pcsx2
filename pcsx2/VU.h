@@ -1,17 +1,5 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2010  PCSX2 Dev Team
- *
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 #include "Vif.h"
@@ -127,7 +115,7 @@ struct ialuPipe
 	u32 Cycle;
 };
 
-struct __aligned16 VURegs
+struct alignas(16) VURegs
 {
 	VECTOR VF[32]; // VF and VI need to be first in this struct for proper mapping
 	REG_VI VI[32]; // needs to be 128bit x 32 (cottonvibes)
@@ -157,11 +145,10 @@ struct __aligned16 VURegs
 	u32 ebit;
 	u32 pending_q;
 	u32 pending_p;
-	u32 blockhasmbit;
 
-	__aligned16 u32 micro_macflags[4];
-	__aligned16 u32 micro_clipflags[4];
-	__aligned16 u32 micro_statusflags[4];
+	alignas(16) u32 micro_macflags[4];
+	alignas(16) u32 micro_clipflags[4];
+	alignas(16) u32 micro_statusflags[4];
 	// MAC/Status flags -- these are used by interpreters but are kind of hacky
 	// and shouldn't be relied on for any useful/valid info.  Would like to move them out of
 	// this struct eventually.
@@ -223,7 +210,7 @@ enum VUPipeState
 	VUPIPE_XGKICK
 };
 
-extern __aligned16 VURegs vuRegs[2];
+extern VURegs vuRegs[2];
 
 // Obsolete(?)  -- I think I'd rather use vu0Regs/vu1Regs or actually have these explicit to any
 // CPP file that needs them only. --air
@@ -234,4 +221,7 @@ static VURegs& VU1 = vuRegs[1];
 inline bool VURegs::IsVU1() const { return this == &vuRegs[1]; }
 inline bool VURegs::IsVU0() const { return this == &vuRegs[0]; }
 
+extern void vuMemAllocate();
+extern void vuMemReset();
+extern void vuMemRelease();
 extern u32* GET_VU_MEM(VURegs* VU, u32 addr);

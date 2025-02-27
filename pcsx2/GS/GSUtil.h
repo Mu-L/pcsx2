@@ -1,57 +1,31 @@
-/*  PCSX2 - PS2 Emulator for PCs
- *  Copyright (C) 2002-2021 PCSX2 Dev Team
- *
- *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU Lesser General Public License as published by the Free Software Found-
- *  ation, either version 3 of the License, or (at your option) any later version.
- *
- *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *  PURPOSE.  See the GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along with PCSX2.
- *  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
 #include "GS.h"
-
-#include <xbyak/xbyak_util.h>
+#include "GSRegs.h"
 
 class GSUtil
 {
 public:
-	static void Init();
+	static const char* GetATSTName(u32 atst);
+	static const char* GetAFAILName(u32 afail);
 
-	static GS_PRIM_CLASS GetPrimClass(uint32 prim);
-	static int GetVertexCount(uint32 prim);
-	static int GetClassVertexCount(uint32 primclass);
+	static GS_PRIM_CLASS GetPrimClass(u32 prim);
+	static int GetVertexCount(u32 prim);
+	static int GetClassVertexCount(u32 primclass);
 
-	static const uint32* HasSharedBitsPtr(uint32 dpsm);
-	static bool HasSharedBits(uint32 spsm, const uint32* ptr);
-	static bool HasSharedBits(uint32 spsm, uint32 dpsm);
-	static bool HasSharedBits(uint32 sbp, uint32 spsm, uint32 dbp, uint32 dpsm);
-	static bool HasCompatibleBits(uint32 spsm, uint32 dpsm);
+	static const u32* HasSharedBitsPtr(u32 dpsm);
+	static bool HasSharedBits(u32 spsm, const u32* ptr);
+	static bool HasSharedBits(u32 spsm, u32 dpsm);
+	static bool HasSharedBits(u32 sbp, u32 spsm, u32 dbp, u32 dpsm);
+	static bool HasCompatibleBits(u32 spsm, u32 dpsm);
+	static bool HasSameSwizzleBits(u32 spsm, u32 dpsm);
+	static u32 GetChannelMask(u32 spsm);
+	static u32 GetChannelMask(u32 spsm, u32 fbmsk);
 
-	static bool CheckSSE();
-	static CRCHackLevel GetRecommendedCRCHackLevel(GSRendererType type);
-
-#ifdef _WIN32
-	static bool CheckDXGI();
-	static bool CheckD3D11();
-	static GSRendererType GetBestRenderer();
-	static D3D_FEATURE_LEVEL CheckDirect3D11Level(IDXGIAdapter* adapter = NULL, D3D_DRIVER_TYPE type = D3D_DRIVER_TYPE_HARDWARE);
-#endif
+	static GSRendererType GetPreferredRenderer();
 };
 
-#ifdef _WIN32
-void GSmkdir(const wchar_t* dir);
-#else
-void GSmkdir(const char* dir);
-#endif
-std::string GStempdir();
-
 const char* psm_str(int psm);
-
-extern Xbyak::util::Cpu g_cpu;
